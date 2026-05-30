@@ -28,7 +28,7 @@ String chatId = TELEGRAM_CHAT_ID;
 
 // Variable untuk tracking notifikasi
 unsigned long lastTelegramTime = 0;
-const unsigned long TELEGRAM_INTERVAL = 300000; // Kirim Telegram setiap 5 menit (300 detik)
+const unsigned long TELEGRAM_INTERVAL = 60000; // Kirim Telegram setiap 1 menit (60.000 milidetik)
 bool pompaStatus = false;
 
 // Fungsi untuk mengirim pesan ke Telegram
