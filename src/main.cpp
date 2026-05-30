@@ -40,15 +40,24 @@ void sendTelegram(String pesan) {
     pesan.replace("\n", "%0A");
 
     // Rakit URL API Telegram
-    String url = "https://api.telegram.org/bot" + botToken + "/sendMessage?chat_id=" + chatId + "&text=" + pesan;
+    // Pastikan chatId bersih dari spasi/karakter tak terlihat
+    String trimmedChat = chatId;
+    trimmedChat.trim();
+
+    String url = "https://api.telegram.org/bot" + botToken + "/sendMessage?chat_id=" + trimmedChat + "&text=" + pesan;
 
     https.begin(client, url);
     int httpCode = https.GET();
 
     if (httpCode > 0) {
-      Serial.printf("[Telegram] Terkirim! Kode: %d\n", httpCode);
+      String payload = https.getString();
+      Serial.printf("[Telegram] HTTP code: %d\n", httpCode);
+      Serial.println("[Telegram] Response: " + payload);
     } else {
       Serial.printf("[Telegram] Error HTTP: %s\n", https.errorToString(httpCode).c_str());
+      // Jika ada payload/error body, coba tampilkan
+      String payload = https.getString();
+      if (payload.length() > 0) Serial.println("[Telegram] Payload: " + payload);
     }
     https.end();
   } else {
