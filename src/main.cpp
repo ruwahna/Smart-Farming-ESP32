@@ -114,12 +114,13 @@ void loop() {
   if(persenTanah < 0) persenTanah = 0;
 
   // MONITORING KE TERMINAL
-  Serial.print("RAW: "); Serial.print(rawTanah);
+  Serial.print(" | RAW TANAH: "); Serial.print(rawTanah);
+  Serial.print(" | RAW LDR: "); Serial.print(rawLDR);
   Serial.print(" | TANAH: "); Serial.print(persenTanah); Serial.print("%");
   Serial.print(" | CAHAYA: "); Serial.print(persenCahaya); Serial.print("%");
   
   if (isnan(suhu)) {
-    Serial.print(" | SUHU: ERROR (Cek Pin D19)");
+    Serial.print(" | SUHU: ERROR (Cek Pin D16)");
   } else {
     Serial.print(" | SUHU: "); Serial.print(suhu); Serial.print("°C");
   }
