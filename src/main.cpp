@@ -6,10 +6,10 @@
 #include "rahasia.h"
 
 // --- 1. PINOUT (PASTIKAN KABEL SESUAI INI) ---
-#define PIN_TANAH  2  // Kabel sensor tanah ke D15
-#define PIN_LDR     4  // Kabel LDR ke D4
-#define PIN_DHT    16  // Kabel data DHT ke D19
-#define PIN_RELAY   5  // Kabel Relay ke D5
+#define PIN_TANAH  32  // Pindahkan kabel sensor tanah ke GPIO 32 (ADC1)
+#define PIN_LDR    33  // Pindahkan kabel LDR ke GPIO 33 (ADC1)
+#define PIN_DHT    16  // Kabel data DHT ke D16 (disamakan dengan komentar)
+#define PIN_RELAY  5   // Kabel Relay ke D5
 
 // --- 2. SETUP SENSOR ---
 #define DHTTYPE DHT22
