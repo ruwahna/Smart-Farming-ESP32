@@ -6,9 +6,9 @@
 #include "rahasia.h"
 
 // --- 1. PINOUT (PASTIKAN KABEL SESUAI INI) ---
-#define PIN_TANAH  15  // Kabel sensor tanah ke D15
+#define PIN_TANAH  2  // Kabel sensor tanah ke D15
 #define PIN_LDR     4  // Kabel LDR ke D4
-#define PIN_DHT    19  // Kabel data DHT ke D19
+#define PIN_DHT    16  // Kabel data DHT ke D19
 #define PIN_RELAY   5  // Kabel Relay ke D5
 
 // --- 2. SETUP SENSOR ---
