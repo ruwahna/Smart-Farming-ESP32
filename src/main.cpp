@@ -98,69 +98,88 @@ void setup() {
 }
 
 void loop() {
-  // BACA DATA
-  int rawTanah = analogRead(PIN_TANAH);
-  float suhu = dht.readTemperature();
-  int rawLDR = analogRead(PIN_LDR);
-  
-  // Konversi LDR ke persentase cahaya (0-100%)
-  int persenCahaya = map(rawLDR, 4095, 0, 0, 100); // Sesuaikan range jika perlu
-
-  // HITUNG PERSENTASE (0-100%)
-  int persenTanah = map(rawTanah, KERING, BASAH, 0, 100);
-  
-  // Keamanan: Batasi angka agar tidak aneh
-  if(persenTanah > 100) persenTanah = 100;
-  if(persenTanah < 0) persenTanah = 0;
-
-  // MONITORING KE TERMINAL
-  Serial.print(" | RAW TANAH: "); Serial.print(rawTanah);
-  Serial.print(" | RAW LDR: "); Serial.print(rawLDR);
-  Serial.print(" | TANAH: "); Serial.print(persenTanah); Serial.print("%");
-  Serial.print(" | CAHAYA: "); Serial.print(persenCahaya); Serial.print("%");
-  
-  if (isnan(suhu)) {
-    Serial.print(" | SUHU: ERROR (Cek Pin D16)");
-  } else {
-    Serial.print(" | SUHU: "); Serial.print(suhu); Serial.print("°C");
-  }
-  Serial.println("");
-
-  // --- LOGIKA POMPA (STOP JALAN SENDIRI) ---
-  bool pompaAktif = false;
-  if (persenTanah < 30) {
-    // Jika tanah sangat kering (< 30%), pompa nyala
-    // Jika pompanya terbalik (mati saat harusnya nyala), ganti LOW jadi HIGH
-    digitalWrite(PIN_RELAY, LOW); 
-    pompaAktif = true;
-    Serial.println(">> POMPA: NYALA (Menyiram)");
-  } 
-  else if (persenTanah > 80) {
-    // Jika sudah basah (> 80%), pompa baru berhenti
-    digitalWrite(PIN_RELAY, HIGH); 
-    pompaAktif = false;
-    Serial.println(">> POMPA: MATI (Tanah Cukup Basah)");
-  }
-
-  // --- KIRIM NOTIFIKASI TELEGRAM ---
   unsigned long currentTime = millis();
   
-  // Kirim notifikasi jika ada perubahan status pompa atau setiap 5 menit
-  if ((pompaAktif != pompaStatus) || (currentTime - lastTelegramTime >= TELEGRAM_INTERVAL)) {
-    String pesan = "🌱 SMART FARMING UPDATE\n";
-    pesan += "━━━━━━━━━━━━━━━━━━━━━\n";
-    pesan += "Kelembaban Tanah: " + String(persenTanah) + "%\n";
-    pesan += "Suhu: " + String(suhu, 1) + "°C\n";
-    pesan += "Intensitas Cahaya: " + String(persenCahaya) + "%\n";
-    pesan += "Status Pompa: " + String(pompaAktif ? "NYALA ✅" : "MATI ⛔") + "\n";
-    pesan += "━━━━━━━━━━━━━━━━━━━━━\n";
-    
-    sendTelegram(pesan);
-    
-    pompaStatus = pompaAktif;
-    lastTelegramTime = currentTime;
-  }
+  // Gunakan static untuk mengingat waktu bacaan terakhir (pengganti delay)
+  static unsigned long lastSensorReadTime = 0;
+  const unsigned long SENSOR_INTERVAL = 2000; // Baca setiap 2000 milidetik (2 detik)
 
-  Serial.println("--------------------------------------");
-  delay(2000); // Tunggu 2 detik tiap bacaan
+  // Hanya jalankan pembacaan data jika sudah berlalu 2 detik
+  if (currentTime - lastSensorReadTime >= SENSOR_INTERVAL) {
+    lastSensorReadTime = currentTime; // Catat waktu bacaan sekarang
+
+    // BACA DATA
+    int rawTanah = analogRead(PIN_TANAH);
+    float suhu = dht.readTemperature();
+    int rawLDR = analogRead(PIN_LDR);
+    
+    // Konversi LDR ke persentase cahaya (0-100%)
+    int persenCahaya = map(rawLDR, 4095, 0, 0, 100); // Sesuaikan range jika perlu
+
+    // HITUNG PERSENTASE (0-100%)
+    int persenTanah = map(rawTanah, KERING, BASAH, 0, 100);
+    
+    // Keamanan: Batasi angka agar tidak aneh
+    if(persenTanah > 100) persenTanah = 100;
+    if(persenTanah < 0) persenTanah = 0;
+
+    // --- LOGIKA POMPA (STOP JALAN SENDIRI) ---
+    bool statusPompaSebelumnya = pompaStatus; // Simpan status sebelumnya untuk keperluan perbandingan
+
+    if (persenTanah < 30) {
+      // Jika tanah sangat kering (< 30%), pompa nyala
+      digitalWrite(PIN_RELAY, LOW); 
+      pompaStatus = true;
+    } 
+    else if (persenTanah > 80) {
+      // Jika sudah basah (> 80%), pompa baru berhenti
+      digitalWrite(PIN_RELAY, HIGH); 
+      pompaStatus = false;
+    }
+
+    // MONITORING KE TERMINAL
+    Serial.print(" | RAW TANAH: "); Serial.print(rawTanah);
+    Serial.print(" | RAW LDR: "); Serial.print(rawLDR);
+    Serial.print(" | TANAH: "); Serial.print(persenTanah); Serial.print("%");
+    Serial.print(" | CAHAYA: "); Serial.print(persenCahaya); Serial.print("%");
+    
+    if (isnan(suhu)) {
+      Serial.print(" | SUHU: ERROR (Cek Pin DHT)");
+    } else {
+      Serial.print(" | SUHU: "); Serial.print(suhu); Serial.print("°C");
+    }
+
+    // Tambahan: print status pompa "Aktif/Nonaktif" langsung di barisan Serial
+    Serial.print(" | POMPA: "); 
+    Serial.print(pompaStatus ? "AKTIF" : "NONAKTIF");
+    Serial.println("");
+
+    // Cetak log kalau ada perubahan dari MATI ke NYALA, atau sebaliknya
+    if (pompaStatus && !statusPompaSebelumnya) {
+      Serial.println(">> POMPA: NYALA (Menyiram)");
+    } else if (!pompaStatus && statusPompaSebelumnya) {
+      Serial.println(">> POMPA: MATI (Tanah Cukup Basah)");
+    }
+
+    // --- KIRIM NOTIFIKASI TELEGRAM ---
+    // Kirim notifikasi jika ada perubahan status pompa atau setiap interval tertentu
+    if ((pompaStatus != statusPompaSebelumnya) || (currentTime - lastTelegramTime >= TELEGRAM_INTERVAL)) {
+      String pesan = "🌱 SMART FARMING UPDATE\n";
+      pesan += "━━━━━━━━━━━━━━━━━━━━━\n";
+      pesan += "Kelembaban Tanah: " + String(persenTanah) + "%\n";
+      pesan += "Suhu: " + String(suhu, 1) + "°C\n";
+      pesan += "Intensitas Cahaya: " + String(persenCahaya) + "%\n";
+      pesan += "Status Pompa: " + String(pompaStatus ? "AKTIF ✅" : "NONAKTIF ⛔") + "\n";
+      pesan += "━━━━━━━━━━━━━━━━━━━━━\n";
+      
+      sendTelegram(pesan);
+      
+      // Update waktu timer telegram tanpa mengubah status pompa lagi
+      lastTelegramTime = currentTime;
+    }
+
+    Serial.println("--------------------------------------");
+  } // Penutup fungsi millis sensor
+  
+  // Hapus delay(2000) dari sini agar ESP32 bisa menjalankan hal-hal lain tanpa macet.
 }
