@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include "DHT.h"
 #include <WiFi.h>
+#include <WiFiMulti.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include "rahasia.h"
@@ -20,6 +21,7 @@ const int KERING = 3800;
 const int BASAH  = 1800; 
 
 // --- 4. PENGATURAN KONEKSI & TELEGRAM ---
+WiFiMulti wifiMulti;
 WiFiClientSecure client;
 HTTPClient https;
 
@@ -35,6 +37,11 @@ bool pompaStatus = false;
 unsigned long waktuPompaMulai = 0;
 const unsigned long MAKSIMAL_WAKTU_POMPA = 20000; // Batas pompa menyala: 20 detik
 bool pompaKenaTimeout = false; 
+
+// --- [BARU] VARIABEL UNTUK JEDA POMPA ---
+unsigned long waktuJedaMulai = 0;
+const unsigned long WAKTU_JEDA_POMPA = 20000; // Jeda 20 detik
+bool sedangJeda = false;
 
 // Fungsi untuk mengirim pesan ke Telegram
 void sendTelegram(String pesan) {
@@ -63,11 +70,26 @@ void setup() {
   
   Serial.println("\n--- SISTEM AKTIF: SMART FARMING UPB ---");
   
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  // Mendaftarkan daftar WiFi dari rahasia.h
+  for (int i = 0; i < wifiListSize; i++) {
+    wifiMulti.addAP(wifiList[i].ssid, wifiList[i].password);
+  }
+
+  Serial.println("Menghubungkan ke WiFi...");
   int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+  while (wifiMulti.run() != WL_CONNECTED && attempts < 20) {
     delay(500);
+    Serial.print(".");
     attempts++;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("");
+    Serial.print("Terhubung ke WiFi: ");
+    Serial.println(WiFi.SSID());
+  } else {
+    Serial.println("");
+    Serial.println("Gagal terhubung ke WiFi mana pun.");
   }
   
   client.setInsecure(); 
@@ -83,6 +105,10 @@ void loop() {
   const unsigned long SENSOR_INTERVAL = 2000; // Baca sensor tiap 2 detik
 
   if (currentTime - lastSensorReadTime >= SENSOR_INTERVAL) {
+    // Pastikan koneksi WiFi tetap terjaga (fail-over otomatis)
+    if (wifiMulti.run() != WL_CONNECTED) {
+      Serial.println("Peringatan: WiFi terputus, mencoba menghubungkan kembali...");
+    }
     lastSensorReadTime = currentTime; 
 
     // Baca Nilai Sensor
@@ -106,19 +132,30 @@ void loop() {
         pompaStatus = false;
         Serial.println(">> STATUS LOG: Penyiraman selesai, kelembaban cukup (>= 80%).");
       }
+      sedangJeda = false; // Reset jeda karena tanah sudah basah
     } 
     else { // Jika persenTanah < 80
-      if (!pompaStatus) {
+      // Evaluasi masa jeda pompa
+      if (sedangJeda) {
+        if (currentTime - waktuJedaMulai >= WAKTU_JEDA_POMPA) {
+          sedangJeda = false; // Waktu jeda selesai
+          Serial.println(">> STATUS LOG: Jeda 20 detik selesai. Evaluasi kelembaban kembali...");
+        }
+      }
+
+      if (!pompaStatus && !sedangJeda) {
         digitalWrite(PIN_RELAY, LOW); // Nyalakan pompa (Relay ON)
         pompaStatus = true;
         waktuPompaMulai = currentTime; 
         Serial.println(">> STATUS LOG: Tanah kering (< 80%). Pompa menyala (20 detik)...");
-      } else {
+      } else if (pompaStatus) {
         // Pompa sedang menyala, cek apakah 20 detik sudah berlalu dengan millis()
         if (currentTime - waktuPompaMulai >= MAKSIMAL_WAKTU_POMPA) {
           digitalWrite(PIN_RELAY, HIGH); // Matikan sementara (Relay OFF)
           pompaStatus = false;
-          Serial.println(">> STATUS LOG: Pemompaan 20 detik selesai. Jeda untuk evaluasi sensor...");
+          sedangJeda = true; // Aktifkan masa jeda
+          waktuJedaMulai = currentTime;
+          Serial.println(">> STATUS LOG: Pemompaan 20 detik selesai. Jeda 20 detik untuk evaluasi sensor...");
         }
       }
     }
