@@ -20,17 +20,23 @@ DHT dht(PIN_DHT, DHTTYPE);
 const int KERING = 3800; 
 const int BASAH  = 1800; 
 
-// --- 4. PENGATURAN KONEKSI & TELEGRAM ---
+// --- 4. PENGATURAN KONEKSI, TELEGRAM & API ---
 WiFiMulti wifiMulti;
 WiFiClientSecure client;
 HTTPClient https;
+HTTPClient http;
 
 String botToken = TELEGRAM_BOT_TOKEN;
 String chatId = TELEGRAM_CHAT_ID;
 
+const char* API_SERVER = "http://MONITORING_API_IP:3000";
+const unsigned long API_INTERVAL = 60000;
+
 // Variabel tracking waktu (Millis)
 unsigned long lastTelegramTime = 0;
-const unsigned long TELEGRAM_INTERVAL = 120000; // Rutin kirim Telegram tiap 2 menit
+const unsigned long TELEGRAM_INTERVAL = 120000;
+unsigned long lastApiTime = 0;
+const unsigned long API_INTERVAL = 60000;
 bool pompaStatus = false;
 
 // --- [BARU] VARIABEL UNTUK BATASAN WAKTU POMPA ---
@@ -42,6 +48,24 @@ bool pompaKenaTimeout = false;
 unsigned long waktuJedaMulai = 0;
 const unsigned long WAKTU_JEDA_POMPA = 20000; // Jeda 20 detik
 bool sedangJeda = false;
+
+// Fungsi kirim data sensor ke API
+bool sendSensorToAPI(int soil, int light, float temp, float hum, bool pump) {
+  if (WiFi.status() != WL_CONNECTED) return false;
+
+  String url = String(API_SERVER) + "/api/sensor";
+  String json = "{\"soil_moisture\":" + String(soil) +
+                ",\"light_intensity\":" + String(light) +
+                ",\"temperature\":" + String(temp, 1) +
+                ",\"humidity\":" + String(hum, 1) +
+                ",\"pump_status\":" + String(pump ? 1 : 0) + "}";
+
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  int code = http.POST(json);
+  http.end();
+  return code == 200 || code == 201;
+}
 
 // Fungsi untuk mengirim pesan ke Telegram
 void sendTelegram(String pesan) {
@@ -178,6 +202,19 @@ void loop() {
     Serial.print(" | SUHU: "); Serial.print(txtSuhu);
     Serial.print(" | POMPA: "); 
     Serial.println(pompaStatus ? "AKTIF" : "NONAKTIF");
+
+    float hum = dht.readHumidity();
+    if (isnan(hum)) hum = 0;
+
+    if (currentTime - lastApiTime >= API_INTERVAL) {
+      bool apiOk = sendSensorToAPI(persenTanah, persenCahaya, suhu, hum, pompaStatus);
+      if (apiOk) {
+        Serial.println("[API] Data sensor berhasil dikirim ke monitoring-api");
+      } else {
+        Serial.println("[API] Gagal kirim data sensor (cek koneksi/API)");
+      }
+      lastApiTime = currentTime;
+    }
 
     // Pengiriman Notifikasi Ke Telegram Rutin / Berubah Status
     if ((pompaStatus != statusPompaSebelumnya) || (currentTime - lastTelegramTime >= TELEGRAM_INTERVAL)) {
