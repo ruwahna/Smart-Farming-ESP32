@@ -1,100 +1,268 @@
 #include <Arduino.h>
-#include "DHT.h"
 #include <WiFi.h>
 #include <WiFiMulti.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
+#include <DHT.h>
 #include "rahasia.h"
 
-// --- 1. PINOUT (KABEL SAMBUNGAN ESP32) ---
-#define PIN_TANAH  32  
-#define PIN_LDR    33  
-#define PIN_DHT    16  
-#define PIN_RELAY  5   
+// --- Pin Configuration ---
+#define PIN_DHT    16
+#define PIN_SOIL   32
+#define PIN_LIGHT  33
+#define PIN_PUMP   5
 
-// --- 2. SETUP SENSOR DHT ---
+// --- Sensor Setup ---
 #define DHTTYPE DHT22
 DHT dht(PIN_DHT, DHTTYPE);
 
-// --- 3. ANGKA KALIBRASI SENSOR TANAH ---
-const int KERING = 3800; 
-const int BASAH  = 1800; 
+// --- Kalibrasi Sensor Tanah (ESP32 ADC 12-bit: 0-4095) ---
+const int NILAI_KERING = 3800;
+const int NILAI_BASAH  = 1800;
 
-// --- 4. PENGATURAN KONEKSI, TELEGRAM & API ---
+// --- WiFi & API ---
 WiFiMulti wifiMulti;
 WiFiClientSecure client;
-HTTPClient https;
 HTTPClient http;
+HTTPClient https;
+
+const char* API_SERVER = "https://apiapimonitoringplant.vigian-ai.my.id";
+const unsigned long API_INTERVAL = 10000;
+const unsigned long SETTINGS_CHECK_INTERVAL = 5000; // Sekarang mengecek setiap 5 detik
+const unsigned long TELEGRAM_INTERVAL = 120000;
 
 String botToken = TELEGRAM_BOT_TOKEN;
 String chatId = TELEGRAM_CHAT_ID;
 
-const char* API_SERVER = "http://MONITORING_API_IP:3000";
-const unsigned long API_INTERVAL = 60000;
+// --- Settings Structure ---
+struct DeviceSettings {
+  int soil_threshold = 30;
+  int pump_max_duration = 20;
+  int pump_cooldown = 20;
+  bool telegram_enabled = true;
+  bool auto_water_enabled = true;
+  unsigned long last_watering = 0;
+};
 
-// Variabel tracking waktu (Millis)
-unsigned long lastTelegramTime = 0;
-const unsigned long TELEGRAM_INTERVAL = 120000;
+DeviceSettings deviceSettings;
+
+// --- Time Tracking ---
 unsigned long lastApiTime = 0;
-const unsigned long API_INTERVAL = 60000;
-bool pompaStatus = false;
+unsigned long lastSettingsCheck = 0;
+unsigned long pumpStart = 0;
+unsigned long lastTelegramTime = 0;
 
-// --- [BARU] VARIABEL UNTUK BATASAN WAKTU POMPA ---
-unsigned long waktuPompaMulai = 0;
-const unsigned long MAKSIMAL_WAKTU_POMPA = 20000; // Batas pompa menyala: 20 detik
-bool pompaKenaTimeout = false; 
+bool pumpStatus = false;
 
-// --- [BARU] VARIABEL UNTUK JEDA POMPA ---
-unsigned long waktuJedaMulai = 0;
-const unsigned long WAKTU_JEDA_POMPA = 20000; // Jeda 20 detik
-bool sedangJeda = false;
+// --- OOP Sensor Classes ---
+class SensorReader {
+public:
+  float readTemperature() {
+    float temp = dht.readTemperature();
+    return isnan(temp) ? 0 : temp;
+  }
 
-// Fungsi kirim data sensor ke API
-bool sendSensorToAPI(int soil, int light, float temp, float hum, bool pump) {
-  if (WiFi.status() != WL_CONNECTED) return false;
+  float readHumidity() {
+    float hum = dht.readHumidity();
+    return isnan(hum) ? 0 : hum;
+  }
 
-  String url = String(API_SERVER) + "/api/sensor";
-  String json = "{\"soil_moisture\":" + String(soil) +
-                ",\"light_intensity\":" + String(light) +
-                ",\"temperature\":" + String(temp, 1) +
-                ",\"humidity\":" + String(hum, 1) +
-                ",\"pump_status\":" + String(pump ? 1 : 0) + "}";
+  int readSoilMoisture() {
+    int raw = analogRead(PIN_SOIL);
+    int pct = map(raw, NILAI_KERING, NILAI_BASAH, 0, 100);
+    if (pct > 100) pct = 100;
+    if (pct < 0) pct = 0;
+    return pct;
+  }
 
-  http.begin(url);
-  http.addHeader("Content-Type", "application/json");
-  int code = http.POST(json);
-  http.end();
-  return code == 200 || code == 201;
+  int readLightIntensity() {
+    int raw = analogRead(PIN_LIGHT);
+    return map(raw, 0, 4095, 0, 100);
+  }
+};
+
+class WaterPumpController {
+private:
+  uint8_t pin;
+  bool running = false;
+
+public:
+  WaterPumpController(uint8_t pumpPin) : pin(pumpPin) {
+  }
+
+  void begin() {
+    pinMode(pin, OUTPUT);
+    stop();
+  }
+
+  void start() {
+    digitalWrite(pin, LOW);
+    pumpStart = millis();
+    running = true;
+  }
+
+  void stop() {
+    digitalWrite(pin, HIGH);
+    pumpStart = 0;
+    running = false;
+  }
+
+  bool isRunning() {
+    return running;
+  }
+
+  bool shouldStop(int maxDuration) {
+    return isRunning() && (millis() - pumpStart) >= (maxDuration * 1000);
+  }
+};
+
+class APIClient {
+private:
+  HTTPClient& http;
+  WiFiClientSecure& client;
+
+public:
+  APIClient(HTTPClient& httpClient, WiFiClientSecure& wifiClient)
+    : http(httpClient), client(wifiClient) {}
+
+  bool sendSensorData(float temp, float hum, int light, int soil, bool pumpStatus) {
+    if (WiFi.status() != WL_CONNECTED) return false;
+
+    String url = String(API_SERVER) + "/api/sensor";
+    String json = "{\"device_id\":\"esp32-001\"";
+    json += ",\"temperature\":" + String(temp, 1);
+    json += ",\"humidity\":" + String(hum, 1);
+    json += ",\"light_intensity\":" + String(light);
+    json += ",\"soil_moisture\":" + String(soil);
+    json += ",\"pump_status\":" + String(pumpStatus ? 1 : 0);
+    json += ",\"wifi_ssid\":\"" + WiFi.SSID() + "\"";
+    json += ",\"rssi\":" + String(WiFi.RSSI());
+    json += ",\"firmware_version\":\"1.0.0\"";
+    json += "}";
+
+    http.begin(client, url);
+    http.addHeader("Content-Type", "application/json");
+    int code = http.POST(json);
+    http.end();
+    return code == 200 || code == 201;
+  }
+
+  bool fetchSettings(DeviceSettings& settings) {
+    if (WiFi.status() != WL_CONNECTED) return false;
+
+    String url = String(API_SERVER) + "/api/settings";
+    http.begin(client, url);
+    int code = http.GET();
+
+    if (code == 200) {
+      String payload = http.getString();
+      http.end();
+
+      int soilIdx = payload.indexOf("\"soil_threshold\":");
+      int pumpDurIdx = payload.indexOf("\"pump_max_duration\":");
+      int pumpCoolIdx = payload.indexOf("\"pump_cooldown\":");
+      int teleIdx = payload.indexOf("\"telegram_enabled\":");
+      int autoIdx = payload.indexOf("\"auto_water_enabled\":");
+
+      if (soilIdx != -1) {
+        settings.soil_threshold = payload.substring(soilIdx + 17, payload.indexOf(',', soilIdx)).toInt();
+      }
+      if (pumpDurIdx != -1) {
+        settings.pump_max_duration = payload.substring(pumpDurIdx + 20, payload.indexOf(',', pumpDurIdx)).toInt();
+      }
+      if (pumpCoolIdx != -1) {
+        settings.pump_cooldown = payload.substring(pumpCoolIdx + 16, payload.indexOf(',', pumpCoolIdx)).toInt();
+      }
+      if (teleIdx != -1) {
+        int endVal = payload.indexOf(',', teleIdx);
+        if(endVal == -1) endVal = payload.indexOf('}', teleIdx);
+        String val = payload.substring(teleIdx + 19, endVal);
+        val.trim();
+        settings.telegram_enabled = (val == "true");
+      }
+      if (autoIdx != -1) {
+        int endVal = payload.indexOf(',', autoIdx);
+        if(endVal == -1) endVal = payload.indexOf('}', autoIdx);
+        String val = payload.substring(autoIdx + 21, endVal);
+        val.trim();
+        settings.auto_water_enabled = (val == "true");
+      }
+      
+      Serial.printf("[DEBUG] Parsed - Soil: %d, Dur: %d, Cool: %d, Tele: %d, Auto: %d\n", 
+          settings.soil_threshold, settings.pump_max_duration, settings.pump_cooldown, 
+          settings.telegram_enabled, settings.auto_water_enabled);
+          
+      return true;
+    }
+    http.end();
+    return false;
+  }
+
+  void logWatering(int duration) {
+    if (WiFi.status() != WL_CONNECTED) return;
+
+    String url = String(API_SERVER) + "/api/logs";
+    String json = "{\"device_id\":\"esp32-001\",\"action\":\"auto_watering\",\"duration_seconds\":" + String(duration) + "}";
+
+    http.begin(client, url);
+    http.addHeader("Content-Type", "application/json");
+    http.POST(json);
+    http.end();
+  }
+};
+
+// --- Telegram Notification ---
+void sendTelegram(String pesan) {
+  if (WiFi.status() != WL_CONNECTED || !deviceSettings.telegram_enabled) return;
+  
+  // URL Encoding
+  pesan.replace("%", "%25"); // Encode simbol persen
+  pesan.replace(" ", "%20");
+  pesan.replace("\n", "%0A");
+  
+  String trimmedChat = chatId;
+  trimmedChat.trim();
+  
+  String url = "https://api.telegram.org/bot" + botToken + "/sendMessage?chat_id=" + trimmedChat + "&text=" + pesan;
+  
+  https.begin(client, url);
+  int httpCode = https.GET();
+  
+  if (httpCode > 0) {
+    Serial.printf("[Telegram] HTTP Status Code: %d\n", httpCode);
+  } else {
+    Serial.printf("[Telegram] Gagal! Error: %s\n", https.errorToString(httpCode).c_str());
+  }
+  
+  https.end();
 }
 
-// Fungsi untuk mengirim pesan ke Telegram
-void sendTelegram(String pesan) {
-  if (WiFi.status() == WL_CONNECTED) {
-    pesan.replace(" ", "%20");
-    pesan.replace("\n", "%0A");
+// --- OOP Instances ---
+SensorReader sensorReader;
+WaterPumpController pump(PIN_PUMP);
+APIClient api(http, client);
 
-    String trimmedChat = chatId;
-    trimmedChat.trim();
+// --- Auto Watering Logic ---
+bool shouldStartWatering(int soilMoisture) {
+  unsigned long now = millis();
+  unsigned long timeSinceLastWater = (now - deviceSettings.last_watering) / 1000;
 
-    String url = "https://api.telegram.org/bot" + botToken + "/sendMessage?chat_id=" + trimmedChat + "&text=" + pesan;
+  if (!deviceSettings.auto_water_enabled) return false;
+  if (pump.isRunning()) return false;
+  if (timeSinceLastWater < deviceSettings.pump_cooldown) return false;
 
-    https.begin(client, url);
-    int httpCode = https.GET();
-    https.end();
-  }
+  return soilMoisture < deviceSettings.soil_threshold;
 }
 
 void setup() {
   Serial.begin(115200);
   dht.begin();
-  pinMode(PIN_RELAY, OUTPUT);
-  
-  // Amankan posisi awal relay (MATI)
-  digitalWrite(PIN_RELAY, HIGH); 
-  
-  Serial.println("\n--- SISTEM AKTIF: SMART FARMING UPB ---");
-  
-  // Mendaftarkan daftar WiFi dari rahasia.h
+  pump.begin(); // Panggil begin() di sini agar pin diinisialisasi dengan benar!
+  pinMode(PIN_SOIL, INPUT);
+  pinMode(PIN_LIGHT, INPUT);
+
+  Serial.println("\n--- Smart Farming ESP32 Start ---");
+
   for (int i = 0; i < wifiListSize; i++) {
     wifiMulti.addAP(wifiList[i].ssid, wifiList[i].password);
   }
@@ -106,128 +274,81 @@ void setup() {
     Serial.print(".");
     attempts++;
   }
-  
+
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("");
     Serial.print("Terhubung ke WiFi: ");
     Serial.println(WiFi.SSID());
+    client.setInsecure();
+    sendTelegram("=== SISTEM SMART FARMING UPB AKTIF ===");
   } else {
     Serial.println("");
-    Serial.println("Gagal terhubung ke WiFi mana pun.");
-  }
-  
-  client.setInsecure(); 
-  if (WiFi.status() == WL_CONNECTED) {
-    sendTelegram("=== SISTEM SMART FARMING UPB AKTIF ===");
+    Serial.println("Gagal terhubung ke WiFi.");
   }
 }
 
 void loop() {
   unsigned long currentTime = millis();
-  
+
   static unsigned long lastSensorReadTime = 0;
-  const unsigned long SENSOR_INTERVAL = 2000; // Baca sensor tiap 2 detik
+  const unsigned long SENSOR_INTERVAL = 2000;
 
   if (currentTime - lastSensorReadTime >= SENSOR_INTERVAL) {
-    // Pastikan koneksi WiFi tetap terjaga (fail-over otomatis)
     if (wifiMulti.run() != WL_CONNECTED) {
       Serial.println("Peringatan: WiFi terputus, mencoba menghubungkan kembali...");
     }
-    lastSensorReadTime = currentTime; 
+    lastSensorReadTime = currentTime;
 
-    // Baca Nilai Sensor
-    int rawTanah = analogRead(PIN_TANAH);
-    int rawLDR = analogRead(PIN_LDR);
-    float suhu = dht.readTemperature();
-    
-    // Konversi Persentase
-    int persenCahaya = map(rawLDR, 4095, 0, 0, 100);
-    if(persenCahaya > 100) persenCahaya = 100; if(persenCahaya < 0) persenCahaya = 0;
+    float suhu = sensorReader.readTemperature();
+    float hum = sensorReader.readHumidity();
+    int soil = sensorReader.readSoilMoisture();
+    int light = sensorReader.readLightIntensity();
 
-    int persenTanah = map(rawTanah, KERING, BASAH, 0, 100);
-    if(persenTanah > 100) persenTanah = 100; if(persenTanah < 0) persenTanah = 0;
+    Serial.print("[SENSOR] Temp: "); Serial.print(suhu, 1); Serial.print("C | Hum: ");
+    Serial.print(hum, 1); Serial.print("% | Soil: "); Serial.print(soil); Serial.print("% | Light: ");
+    Serial.print(light); Serial.println("%");
 
-    bool statusPompaSebelumnya = pompaStatus; 
-
-    // --- LOGIKA PENYIRAMAN BARU ---
-    if (persenTanah >= 80) {
-      if (pompaStatus) {
-        digitalWrite(PIN_RELAY, HIGH); // Matikan pompa (Relay OFF)
-        pompaStatus = false;
-        Serial.println(">> STATUS LOG: Penyiraman selesai, kelembaban cukup (>= 80%).");
-      }
-      sedangJeda = false; // Reset jeda karena tanah sudah basah
-    } 
-    else { // Jika persenTanah < 80
-      // Evaluasi masa jeda pompa
-      if (sedangJeda) {
-        if (currentTime - waktuJedaMulai >= WAKTU_JEDA_POMPA) {
-          sedangJeda = false; // Waktu jeda selesai
-          Serial.println(">> STATUS LOG: Jeda 20 detik selesai. Evaluasi kelembaban kembali...");
-        }
-      }
-
-      if (!pompaStatus && !sedangJeda) {
-        digitalWrite(PIN_RELAY, LOW); // Nyalakan pompa (Relay ON)
-        pompaStatus = true;
-        waktuPompaMulai = currentTime; 
-        Serial.println(">> STATUS LOG: Tanah kering (< 80%). Pompa menyala (20 detik)...");
-      } else if (pompaStatus) {
-        // Pompa sedang menyala, cek apakah 20 detik sudah berlalu dengan millis()
-        if (currentTime - waktuPompaMulai >= MAKSIMAL_WAKTU_POMPA) {
-          digitalWrite(PIN_RELAY, HIGH); // Matikan sementara (Relay OFF)
-          pompaStatus = false;
-          sedangJeda = true; // Aktifkan masa jeda
-          waktuJedaMulai = currentTime;
-          Serial.println(">> STATUS LOG: Pemompaan 20 detik selesai. Jeda 20 detik untuk evaluasi sensor...");
-        }
+    if (currentTime - lastSettingsCheck >= SETTINGS_CHECK_INTERVAL) {
+      lastSettingsCheck = currentTime;
+      if (api.fetchSettings(deviceSettings)) {
+        Serial.println("[API] Settings updated from server");
       }
     }
-
-    // [BARU] Cek apakah pompa menyala melebihi batas waktu pengaman (Timeout)
-    if (pompaStatus && (currentTime - waktuPompaMulai >= MAKSIMAL_WAKTU_POMPA)) {
-      digitalWrite(PIN_RELAY, HIGH); // Paksa MATI pompanya
-      pompaStatus = false;
-      pompaKenaTimeout = true; // Kunci status agar tidak menyala lagi sebelum tanah basah/direset
-      
-      Serial.println("⚠️ WARNING: Pompa dimatikan paksa oleh sistem karena batas waktu habis!");
-      sendTelegram("⚠️ PERINGATAN: Pompa menyala terlalu lama (Overtime)! Dimatikan otomatis demi keamanan alat. Cek kondisi air atau sensor!");
-    }
-
-    // Monitoring Terminal
-    Serial.print("[DATA] TANAH: "); Serial.print(persenTanah); Serial.print("%");
-    Serial.print(" | CAHAYA: "); Serial.print(persenCahaya); Serial.print("%");
-    
-    String txtSuhu = isnan(suhu) ? "ERROR" : String(suhu, 1) + " C";
-    Serial.print(" | SUHU: "); Serial.print(txtSuhu);
-    Serial.print(" | POMPA: "); 
-    Serial.println(pompaStatus ? "AKTIF" : "NONAKTIF");
-
-    float hum = dht.readHumidity();
-    if (isnan(hum)) hum = 0;
 
     if (currentTime - lastApiTime >= API_INTERVAL) {
-      bool apiOk = sendSensorToAPI(persenTanah, persenCahaya, suhu, hum, pompaStatus);
-      if (apiOk) {
-        Serial.println("[API] Data sensor berhasil dikirim ke monitoring-api");
-      } else {
-        Serial.println("[API] Gagal kirim data sensor (cek koneksi/API)");
-      }
       lastApiTime = currentTime;
+
+      bool apiOk = api.sendSensorData(suhu, hum, light, soil, pump.isRunning());
+      if (apiOk) {
+        Serial.println("[API] Data sensor berhasil dikirim");
+      } else {
+        Serial.println("[API] Gagal kirim data sensor");
+      }
     }
 
-    // Pengiriman Notifikasi Ke Telegram Rutin / Berubah Status
-    if ((pompaStatus != statusPompaSebelumnya) || (currentTime - lastTelegramTime >= TELEGRAM_INTERVAL)) {
-      String pesan = "SMART FARMING UPDATE\n";
-      pesan += "---------------------\n";
-      pesan += "Kelembaban Tanah: " + String(persenTanah) + " %\n";
-      pesan += "Suhu Udara: " + txtSuhu + "\n";
-      pesan += "Status Pompa: " + String(pompaStatus ? "AKTIF (MENYIRAM)" : "NONAKTIF (STANDBY)") + "\n";
-      pesan += "---------------------";
-      
-      sendTelegram(pesan);
-      lastTelegramTime = currentTime; 
+    if (shouldStartWatering(soil)) {
+      Serial.println("[AUTO] Starting auto watering...");
+      pump.start();
+      deviceSettings.last_watering = currentTime;
+      api.logWatering(deviceSettings.pump_max_duration);
     }
-    Serial.println("-----------------------------------------------------------------");
-  } 
+
+    if (pump.shouldStop(deviceSettings.pump_max_duration)) {
+      Serial.println("[AUTO] Stopping pump after max duration");
+      sendTelegram("⚠️ PERINGATAN: Pompa menyala terlalu lama! Dimatikan otomatis.");
+      pump.stop();
+    }
+
+    bool currentPumpStatus = pump.isRunning();
+    if (currentPumpStatus != pumpStatus) {
+      sendTelegram("SMART FARMING UPDATE\n----------------------\nKelembaban Tanah: " + String(soil) + "%\nStatus Pompa: " + String(currentPumpStatus ? "AKTIF (MENYIRAM)" : "NONAKTIF (STANDBY)"));
+      pumpStatus = currentPumpStatus;
+    } else if (currentTime - lastTelegramTime >= TELEGRAM_INTERVAL) {
+      String pesan = "SMART FARMING UPDATE\n----------------------\nKelembaban Tanah: " + String(soil) + "%\nStatus Pompa: " + String(currentPumpStatus ? "AKTIF (MENYIRAM)" : "NONAKTIF (STANDBY)");
+      sendTelegram(pesan);
+      lastTelegramTime = currentTime;
+    }
+
+    Serial.println("---------------------------------");
+  }
 }
